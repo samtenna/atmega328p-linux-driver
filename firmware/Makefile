@@ -1,7 +1,7 @@
 PROGRAM_NAME = main
 BUILD_DIR = build
 
-all: $(PROGRAM_NAME)
+all: $(PROGRAM_NAME) upload
 
 # Create the build directory
 $(BUILD_DIR):
@@ -14,7 +14,7 @@ $(PROGRAM_NAME): $(BUILD_DIR)
 
 # Upload the built program (hex file) to Atmega328P using USBasp
 upload: $(PROGRAM_NAME)
-	avrdude -c usbasp-clone -p m328p -U flash:w:$(BUILD_DIR)/$(PROGRAM_NAME).hex
+	avrdude -v -p atmega328p -c arduino -P /dev/ttyACM0 -U flash:w:$(BUILD_DIR)/$(PROGRAM_NAME).hex
 
 # Remove build directory with all built files
 clean:
