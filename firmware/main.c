@@ -4,6 +4,7 @@
 #define BAUD 9600
 #define SENTINEL_BYTE 0xAA
 #define CMD_FRAME_LENGTH 6 // includes the crc + sentinel
+#define RES_FRAME_LENGTH 5 // as above (so below)
 #define CRC8_POLYNOMIAL 0x31
 
 #include <avr/io.h>
@@ -12,8 +13,6 @@
 #include <util/setbaud.h>
 #include <avr/interrupt.h>
 
-static int ledClockCounter = 0;
-
 typedef enum {
     STATE_IDLE, // waiting for next frame
     STATE_RECEIVING, // waiting for next byte within frame
@@ -21,19 +20,22 @@ typedef enum {
 } TransmissionState;
 
 typedef enum {
-    STATUS_OK,
-    STATUS_ERR_CRC,
-    STATUS_ERR_INVAL,
-    STATUS_ERR_TIMEOUT,
+    STATUS_OK = 0x00,
+    STATUS_ERR_CRC = 0x01,
+    STATUS_ERR_INVAL = 0x02,
+    STATUS_ERR_TIMEOUT = 0x03,
 } ResponseStatus;
 
 typedef enum {
-    CMD_PING,
-    CMD_ADC,
-    CMD_LED_TIMER,
+    CMD_PING = 0x00,
+    CMD_ADC = 0x01,
+    CMD_LED_TIMER = 0x02,
 } CommandId;
 
-static volatile uint8_t transmissionBuffer[6];
+static volatile int ledClockThreshold = 100;
+static int ledClockCounter = 0;
+
+static volatile uint8_t inputBuffer[6];
 static uint8_t bufferIndex = 0;
 static volatile TransmissionState transmissionState = STATE_IDLE;
 
@@ -58,7 +60,7 @@ void setPinDirections() {
 ISR(TIMER0_COMPA_vect) {
     ledClockCounter++;
 
-    if (ledClockCounter > 100) {
+    if (ledClockCounter > ledClockThreshold) {
         PORTB ^= _BV(PORTB5);
         ledClockCounter = 0;
     }
@@ -70,10 +72,10 @@ void initUART() {
     UBRR0L = UBRRL_VALUE;
 
     // enable receiver and transmitter
-    UCSR0B = _BV(TXEN0) | _BV(RXEN0);
+    UCSR0B = _BV(TXEN0) | _BV(RXEN0) | _BV(RXCIE0);
 
     // 8 data bits, set rx interrupt flag (no parity, 1 stop bit are defaults)
-    UCSR0C |= _BV(UCSZ01) | _BV(UCSZ00) | _BV(RXCIE0);
+    UCSR0C |= _BV(UCSZ01) | _BV(UCSZ00);
 }
 
 ISR(USART_RX_vect) {
@@ -84,14 +86,14 @@ ISR(USART_RX_vect) {
         // check for start of frame byte
         if (byte == SENTINEL_BYTE) {
             transmissionState = STATE_RECEIVING;
-            transmissionBuffer[0] = 0xAA;
+            inputBuffer[0] = 0xAA;
             bufferIndex++;
         }
 
         break;
     }
     case STATE_RECEIVING: {
-        transmissionBuffer[bufferIndex] = byte;
+        inputBuffer[bufferIndex] = byte;
         bufferIndex++;
 
         if (bufferIndex == CMD_FRAME_LENGTH) {
@@ -116,7 +118,7 @@ uint8_t calculateCRC8(volatile uint8_t* bytes, uint8_t length) {
     uint8_t crc = 0;
 
     for (uint8_t i = 0; i < length; i++) {
-        crc ^= transmissionBuffer[i];
+        crc ^= bytes[i];
 
         for (uint8_t bit = 0; bit < 8; bit++) {
             if (crc & 0x80) {
@@ -130,7 +132,44 @@ uint8_t calculateCRC8(volatile uint8_t* bytes, uint8_t length) {
     return crc;
 }
 
-void sendResponse() {}
+void sendResponse(ResponseStatus status, uint16_t payload) {
+    uint8_t response[5];
+    response[0] = SENTINEL_BYTE;
+    response[1] = status;
+    response[2] = (uint8_t)(payload & 0xFF); // low byte
+    response[3] = (uint8_t)(payload >> 8); // high byte
+    response[4] = calculateCRC8(response, RES_FRAME_LENGTH - 1);
+
+    for (uint8_t i = 0; i < 5; i++) {
+        transmitByte(response[i]);
+    }
+}
+
+void processCommand() {
+    uint8_t commandId = inputBuffer[1];
+
+    switch(commandId) {
+    case CMD_PING: {
+        // 0x328P would've been better but unfortunately hex doesn't go that high
+        sendResponse(STATUS_OK, 0x328F);
+
+        break;
+    }
+    case CMD_ADC: {
+        // TODO: do stuff
+        sendResponse(STATUS_ERR_INVAL, 0);
+
+        break;
+    }
+    case CMD_LED_TIMER: {
+        // maybe later use arg2 as the prescaler? for now just going to use arg1 as the timer (100ths/second)
+        ledClockThreshold = (uint16_t)inputBuffer[2] | ((uint16_t)inputBuffer[3] << 8);
+        sendResponse(STATUS_OK, 0);
+
+        break;
+    }
+    }
+}
 
 int main() {
     setPinDirections();
@@ -144,15 +183,16 @@ int main() {
         while (transmissionState != STATE_DONE);
 
         // validate CRC
-        uint8_t crc = calculateCRC8(transmissionBuffer, CMD_FRAME_LENGTH - 1);
-        if (crc != transmissionBuffer[CMD_FRAME_LENGTH - 1]) {
-            // TODO: send retry response
+        uint8_t crc = calculateCRC8(inputBuffer, CMD_FRAME_LENGTH - 1);
+        if (crc != inputBuffer[CMD_FRAME_LENGTH - 1]) {
+            sendResponse(STATUS_ERR_CRC, 0);
 
             transmissionState = STATE_IDLE;
             continue;
         }
 
-        // process command
+        processCommand();
+        transmissionState = STATE_IDLE;
     }
 
     return 0;
