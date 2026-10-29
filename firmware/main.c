@@ -1,5 +1,4 @@
 // Arduino Uno R3 clock speed
-#include <stdint.h>
 #define F_CPU 16000000UL
 #define BAUD 9600
 #define SENTINEL_BYTE 0xAA
@@ -156,8 +155,21 @@ void processCommand() {
         break;
     }
     case CMD_ADC: {
-        // TODO: do stuff
-        sendResponse(STATUS_ERR_INVAL, 0);
+        // enable if not
+        ADCSRA |= _BV(ADEN);
+
+        // only care about the lower nibble
+        uint8_t channelSelection = inputBuffer[2] & 0x0F;
+        // write selection to register
+        ADMUX = channelSelection & 0x0F;
+
+        ADCSRA |= _BV(ADSC);
+
+        // spin on that bit until it's set back to zero (~13 cycles)
+        while (!(ADCSRA & _BV(ADSC)));
+        uint16_t val = ADC;
+
+        sendResponse(STATUS_OK, val);
 
         break;
     }
